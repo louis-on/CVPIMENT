@@ -53,83 +53,97 @@ const readPDFContent = async (filePath) => {
 };
 
 // Helper function to process text with Mistral API
-const processWithMistral = async (text) => {
+async function processWithMistral(text) {
   try {
-    if (!MISTRAL_API_KEY) {
-      throw new Error('Mistral API key is not configured');
-    }
-
-    const response = await axios.post(
-      MISTRAL_API_URL,
-      {
-        model: "mistral-small-latest",
+    const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${MISTRAL_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: "mistral-tiny",
         messages: [
           {
             role: "system",
-            content: `You are a CV parsing assistant. Extract and structure the following information from the CV text into a JSON format with the following structure:
-            {
-              "skills": ["skill1", "skill2", ...],
-              "experiences": [
-                {
-                  "company": "company name",
-                  "position": "job title",
-                  "period": "time period",
-                  "description": "job description"
-                }
-              ],
-              "degrees": [
-                {
-                  "degree": "degree name",
-                  "institution": "institution name",
-                  "year": "graduation year",
-                  "description": "additional details"
-                }
-              ]
-            }
-            
-            Important: Respond ONLY with the JSON object, no additional text or explanation.`
+            content: "You are a CV parsing assistant. Extract information from the CV text and return it in a structured JSON format with the following fields: personalInfo (firstName, lastName, jobTitle, synonymousTitles, interests), skills (array), experiences (array of objects with position, company, period, description), degrees (array of objects with degree, institution, year, description). IMPORTANT: Return ONLY valid JSON without any markdown formatting, additional text, or comments. Do not include trailing commas in arrays or objects."
           },
           {
             role: "user",
             content: text
           }
         ],
-        temperature: 0.7,
-        max_tokens: 1000,
-        response_format: { type: "json_object" }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${MISTRAL_API_KEY}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+        temperature: 0.1,
+        max_tokens: 2000
+      })
+    });
 
-    console.log('Mistral API Response:', response.data);
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error('Mistral API Error Response:', errorData);
+      throw new Error(`Mistral API Error: ${errorData.error?.message || response.statusText}`);
+    }
 
-    if (!response.data || !response.data.choices || !response.data.choices[0] || !response.data.choices[0].message) {
+    const data = await response.json();
+    console.log('Raw Mistral API Response:', data);
+
+    if (!data.choices || !data.choices[0]?.message?.content) {
       throw new Error('Invalid response format from Mistral API');
     }
 
-    const content = response.data.choices[0].message.content;
-    
-    // Try to parse the content directly first
+    let content = data.choices[0].message.content;
+    console.log('Mistral API Content:', content);
+
+    // Clean the content
+    content = content
+      // Remove markdown code blocks if present
+      .replace(/```json\n?|\n?```/g, '')
+      // Remove any text before the first {
+      .replace(/^[^{]*({)/, '$1')
+      // Remove any text after the last }
+      .replace(/(})[^}]*$/, '$1')
+      // Remove comments (both single-line and multi-line)
+      .replace(/\/\/.*/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      // Remove trailing commas in arrays
+      .replace(/,(\s*])/g, '$1')
+      // Remove trailing commas in objects
+      .replace(/,(\s*})/g, '$1')
+      // Remove any trailing commas before closing brackets
+      .replace(/,(\s*[}\]])/g, '$1')
+      // Remove empty lines
+      .replace(/^\s*[\r\n]/gm, '')
+      .trim();
+
+    console.log('Cleaned JSON Content:', content);
+
     try {
-      return JSON.parse(content);
+      const parsedData = JSON.parse(content);
+      console.log('Parsed JSON Data:', parsedData);
+      return parsedData;
     } catch (parseError) {
-      // If direct parsing fails, try to extract JSON from the content
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
-      }
-      throw new Error('No valid JSON found in Mistral response');
+      console.error('JSON Parse Error:', parseError);
+      console.error('Failed to parse content:', content);
+      
+      // Return a default structure if parsing fails
+      return {
+        personalInfo: {
+          firstName: "",
+          lastName: "",
+          jobTitle: "",
+          synonymousTitles: [],
+          interests: []
+        },
+        skills: [],
+        experiences: [],
+        degrees: []
+      };
     }
   } catch (error) {
-    console.error('Mistral API Error:', error.response?.data || error.message);
-    throw new Error(`Mistral API Error: ${error.response?.data?.error?.message || error.message}`);
+    console.error('Mistral API Error:', error);
+    throw error;
   }
-};
+}
 
 // Routes
 app.post('/api/extract-cv', upload.single('cv'), async (req, res) => {
